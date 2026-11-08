@@ -19,7 +19,7 @@ from tmodbus.exceptions import ModbusConnectionError, ModbusResponseError, TModb
 from tmodbus.pdu.base import BaseClientPDU
 from tmodbus.utils.crc import calculate_crc16
 
-from .exceptions import ConnectionInterruptedException, DecodeError, ReadException
+from .exceptions import ConnectionInterruptedException, FileCRCMismatchError, ReadException
 from .modbus_pdu import (
     CompleteUploadPDU,
     LoginPDU,
@@ -238,7 +238,7 @@ class AsyncHuaweiSolarClient(RegisterAwareModbusClient, AsyncModbusClient):
                     f"Computed CRC {calculated_crc:04x} for file {file_type} "
                     f"does not match expected value {swapped_crc:04x}"
                 )
-                raise DecodeError(msg)
+                raise FileCRCMismatchError(msg, file_type=file_type, file_data=file_data)
 
             return file_data
 

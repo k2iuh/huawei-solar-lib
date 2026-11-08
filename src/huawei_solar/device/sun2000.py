@@ -8,6 +8,8 @@ from typing import Any
 from huawei_solar import register_names as rn
 from huawei_solar import register_values as rv
 from huawei_solar.exceptions import (
+    DecodeError,
+    FileCRCMismatchError,
     HuaweiSolarException,
     ReadException,
 )
@@ -232,11 +234,14 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
             raise ReadException(msg)
         start_time = end_time - 600
 
-        file_data = await self.read_file(
-            OptimizerRealTimeDataFile.FILE_TYPE,
-            OptimizerRealTimeDataFile.query_within_timespan(start_time, end_time),
-        )
-        real_time_data = OptimizerRealTimeDataFile(file_data)
+        try:
+            file_data = await self.read_file(
+                OptimizerRealTimeDataFile.FILE_TYPE,
+                OptimizerRealTimeDataFile.query_within_timespan(start_time, end_time),
+            )
+            real_time_data = OptimizerRealTimeDataFile(file_data)
+        except FileCRCMismatchError as err:
+            real_time_data = await self._accept_optimizer_file_despite_crc_mismatch(err)
 
         if len(real_time_data.data_units) == 0:
             return {}
@@ -246,6 +251,37 @@ class SUN2000Device(HuaweiSolarDeviceWithLogin):
         latest_unit = real_time_data.data_units[0]
 
         return {opt.optimizer_address: opt for opt in latest_unit.optimizers}
+
+    async def _accept_optimizer_file_despite_crc_mismatch(self, err: FileCRCMismatchError) -> OptimizerRealTimeDataFile:
+        """Use an optimizer real time data file whose device CRC does not match, if its structure is sound.
+
+        Some inverters return a CRC that does not belong to the payload they sent: the same payload
+        arrives with different CRCs on consecutive reads (see wlcrs/huawei-solar-lib#39). The payload
+        is accepted only if it decodes completely and every data unit, newest first, holds exactly one
+        record for each optimizer the inverter reports. Otherwise the original error is raised.
+        """
+        try:
+            real_time_data = OptimizerRealTimeDataFile(err.file_data)
+        except (DecodeError, ValueError):
+            raise err from None
+
+        nb_optimizers = (await self.get(rn.NB_OPTIMIZERS)).value
+        times = [unit.time for unit in real_time_data.data_units]
+        structure_ok = (
+            len(real_time_data.data_units) > 0
+            and times == sorted(times, reverse=True)
+            and len(set(times)) == len(times)
+            and all(
+                len(unit.optimizers) == nb_optimizers
+                and len({opt.optimizer_address for opt in unit.optimizers}) == nb_optimizers
+                for unit in real_time_data.data_units
+            )
+        )
+        if not structure_ok:
+            raise err
+
+        _LOGGER.info("%s; accepting the file because its structure is valid", err)
+        return real_time_data
 
     async def get_optimizer_system_information_data(
         self,
