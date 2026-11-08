@@ -1,0 +1,83 @@
+---
+# Checks weekly whether upstream has a new release and tries to rebase this fork's commits onto it.
+# It never publishes anything: it pushes a sync/<tag> branch and opens an issue with the outcome.
+name: Fork sync
+
+on: # yamllint disable rule:truthy
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  UPSTREAM: https://github.com/wlcrs/huawei-solar-lib.git
+  FORK_BRANCH: k2iuh
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.FORK_BRANCH }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - name: Find newest upstream release
+        id: tags
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch --quiet --tags upstream
+          base=$(cat .fork-base)
+          latest=$(git ls-remote --tags --refs upstream 'v*' | sed 's#.*refs/tags/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "Fork base: $base, newest upstream release: $latest"
+      - name: Rebase onto new release and test
+        id: rebase
+        if: steps.tags.outputs.latest != steps.tags.outputs.base
+        env:
+          BASE: ${{ steps.tags.outputs.base }}
+          LATEST: ${{ steps.tags.outputs.latest }}
+        run: |
+          git config user.name "fork-sync"
+          git config user.email "fork-sync@users.noreply.github.com"
+          git switch -c "sync/$LATEST"
+          if ! git rebase --onto "$LATEST" "$BASE" > rebase.log 2>&1; then
+            git rebase --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$LATEST" > .fork-base
+          git commit --quiet -am "chore: rebase fork onto $LATEST"
+          if uv run --all-extras --dev pytest -q > tests.log 2>&1; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=tests-failed" >> "$GITHUB_OUTPUT"
+          fi
+          git push --force origin "sync/$LATEST"
+      - name: Report
+        if: steps.rebase.outputs.result != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.tags.outputs.latest }}
+          RESULT: ${{ steps.rebase.outputs.result }}
+        run: |
+          title="Upstream $LATEST: $RESULT"
+          if gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[].number' | grep -q .; then
+            exit 0
+          fi
+          {
+            case "$RESULT" in
+              ok) echo "Rebased cleanly onto $LATEST and tests pass. Branch: sync/$LATEST."
+                  echo "See FORK.md for the steps to finish the update." ;;
+              tests-failed) echo "Rebased onto $LATEST, but tests fail. Branch: sync/$LATEST."
+                  echo; echo '```'; tail -40 tests.log; echo '```' ;;
+              conflict) echo "Rebase onto $LATEST has conflicts and needs manual work."
+                  echo; echo '```'; tail -40 rebase.log; echo '```' ;;
+            esac
+          } > body.md
+          gh issue create --title "$title" --body-file body.md
