@@ -40,6 +40,19 @@ class DecodeError(ReadException):
     """Decoding failed."""
 
 
+class FileCRCMismatchError(DecodeError):
+    """The CRC reported by the device does not match the downloaded file.
+
+    Carries the downloaded payload so that callers can decide whether to trust it anyway.
+    """
+
+    def __init__(self, *args: Any, file_type: int, file_data: bytes, **kwargs: Any) -> None:  # noqa: ANN401
+        """Create FileCRCMismatchError."""
+        super().__init__(*args, **kwargs)
+        self.file_type = file_type
+        self.file_data = file_data
+
+
 class UnexpectedResponseContent(HuaweiSolarException):
     """The response from the device contained unexpected content."""
 
